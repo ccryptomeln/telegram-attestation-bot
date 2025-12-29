@@ -502,16 +502,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 blocks_cache = {}
 
 def main() -> None:
-   token = os.environ.get("BOT_TOKEN")
-
-# fallback for Railway debug (REMOVE AFTER SUCCESS)
-if not token:
-    token = os.getenv("BOT_TOKEN", "")
-
-if not token:
-    print("ENV KEYS:", list(os.environ.keys()))
-    raise RuntimeError("Set BOT_TOKEN env var first")
-
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Set BOT_TOKEN env var first")
 
     global blocks_cache
     blocks_cache = load_all_blocks()
@@ -522,6 +515,7 @@ if not token:
 
     print("Bot is running…")
     app.run_polling(close_loop=False)
+
 
 if __name__ == "__main__":
     main()

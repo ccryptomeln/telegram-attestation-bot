@@ -499,7 +499,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # ----- Main -----
 
-blocks_cache: Dict[str, BlockFile] = {}
+blocks_cache = {}
 
 def main() -> None:
    token = os.environ.get("BOT_TOKEN")

@@ -502,12 +502,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 blocks_cache = {}
 
 def main() -> None:
+    global blocks_cache
+
+    import os
+    print("=== ENV CHECK START ===")
+    print("RAILWAY_ENVIRONMENT =", os.getenv("RAILWAY_ENVIRONMENT"))
+    print("HAS BOT_TOKEN =", "BOT_TOKEN" in os.environ)
+    print("ENV KEYS =", sorted(os.environ.keys()))
+    print("=== ENV CHECK END ===")
+
     token = os.environ.get("BOT_TOKEN")
     if not token:
         raise RuntimeError("Set BOT_TOKEN env var first")
 
-    global blocks_cache
     blocks_cache = load_all_blocks()
+
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))

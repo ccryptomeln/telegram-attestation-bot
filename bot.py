@@ -7,20 +7,6 @@
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # -*- coding: utf-8 -*-
 """
 Telegram MCQ Bot (single correct) with:
@@ -117,3 +103,4 @@ def load_json_block(path: str) -> BlockFile:
             ci = 0
         questions.append(Question(q=q, options=opts, correct_index=ci, explanation=exp))
     return BlockFile(file=os.path.basename(path), title=title, questions=questions)
+

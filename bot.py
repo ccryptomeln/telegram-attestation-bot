@@ -1,104 +1,119 @@
-        await query.message.reply_text("Починаємо тест…")
-        await send_question(update, context)
-        return
-
-    if data.startswith("startfile|"):
-        _, subfile, mode = data.split("|", 2)
-        if subfile not in blocks_cache:
-            await query.message.reply_text("Не знайшов підблок.")
-            return
-        title, questions = build_test_questions(mode, None, subfile)
-        start_session(context, title, questions)
-        await query.message.reply_text("Починаємо тест…")
-        await send_question(update, context)
-        return
-
-    if data.startswith("ans|"):
-        # ans|qid|index
-        session = context.user_data.get("session")
-        if not session:
-            await query.message.reply_text("Сесія не активна. /start")
-            return
-
-        _, qid_str, idx_str = data.split("|", 2)
-        qid = int(qid_str)
-        idx = int(idx_str)
-        # ignore stale answers
-        if session.get("qid") != qid:
-            await query.message.reply_text("Це питання вже не активне.")
-            return
-
-        session_cancel_timer(context)
-
-        cur = session.get("current") or {}
-        opts = cur.get("shuffled_opts") or []
-        ci = int(cur.get("correct_index", 0))
-        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        correct_text = opts[ci] if 0 <= ci < len(opts) else ""
-
-        if idx == ci:
-            session["correct"] += 1
-            await query.message.reply_text(f"✅ Правильно! ({letters[ci]}. {correct_text})")
-        else:
-            chosen = opts[idx] if 0 <= idx < len(opts) else ""
-            await query.message.reply_text(
-                f"❌ Неправильно.\nТвоя відповідь: {letters[idx]}. {chosen}\n✅ Правильна: {letters[ci]}. {correct_text}"
-            )
-
-        session["i"] += 1
-        await send_question(update, context)
-        return
-
-    await query.message.reply_text("Невідома команда. /start")
-
-# ----- Render health-check server -----
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        pass
 
 
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
 
 
-# ----- Main -----
-
-blocks_cache = {}
-
-def main() -> None:
-    global blocks_cache
-
-    import os
-    print("=== ENV CHECK START ===")
-    print("RAILWAY_ENVIRONMENT =", os.getenv("RAILWAY_ENVIRONMENT"))
-    print("HAS BOT_TOKEN =", "BOT_TOKEN" in os.environ)
-    print("ENV KEYS =", sorted(os.environ.keys()))
-    print("=== ENV CHECK END ===")
-
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("Set BOT_TOKEN env var first")
-
-    blocks_cache = load_all_blocks()
 
 
-    app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(on_callback))
-
-    Thread(target=start_health_server, daemon=True).start()
-
-    print("Bot is running…")
-    app.run_polling(close_loop=False)
 
 
-if __name__ == "__main__":
-    main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# -*- coding: utf-8 -*-
+"""
+Telegram MCQ Bot (single correct) with:
+- Main blocks 1..5 (Block 2 has sub-blocks 2.1..2.4)
+- Random order of questions per attempt
+- Random order of answers per question
+- No truncated answers: options are shown in message; buttons are A/B/C...
+- Shows the correct option (letter + full text) after each answer / timeout
+- Timed mode: 60 seconds PER QUESTION (auto-fail and move on)
+
+Setup:
+1) Create bot via @BotFather, copy token
+2) Install deps: pip3 install -r requirements.txt
+3) Export token:
+   export BOT_TOKEN="xxx"
+4) Run: python3 bot.py
+"""
+
+import os
+import json
+import random
+import asyncio
+from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+PER_QUESTION_SECONDS = 60
+FINAL_N = 20
+
+# ----- Data model -----
+
+@dataclass
+class Question:
+    q: str
+    options: List[str]
+    correct_index: int
+    explanation: str = ""
+
+@dataclass
+class BlockFile:
+    file: str
+    title: str
+    questions: List[Question]
+
+# ----- Block structure -----
+# Main blocks (groups). Block 2 is a group with subblocks.
+MAIN_BLOCKS = [
+    {"key": "b1", "title": "1 блок — Аудит", "files": ["block1_audit.json"]},
+    {"key": "b2", "title": "2 блок — Законодавство", "files": [
+        "block2_1_constitution.json",
+        "block2_2_civil_service.json",
+        "block2_3_mku.json",
+        "block2_4_corruption.json",
+    ]},
+    {"key": "b3", "title": "3 блок — Митна вартість", "files": ["block3_value.json"]},
+    {"key": "b4", "title": "4 блок — Походження", "files": ["block4_origin.json"]},
+    {"key": "b5", "title": "5 блок — Платежі", "files": ["block5_payments.json"]},
+]
+
+# Human subblock titles (shown inside Block 2 menu)
+SUBBLOCK_LABELS = {
+    "block2_1_constitution.json": "2.1 Конституція",
+    "block2_2_civil_service.json": "2.2 Держслужба",
+    "block2_3_mku.json": "2.3 МКУ",
+    "block2_4_corruption.json": "2.4 Корупція",
+}
+
+# ----- Utilities -----
+
+def load_json_block(path: str) -> BlockFile:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    title = raw.get("title") or os.path.splitext(os.path.basename(path))[0]
+    questions: List[Question] = []
+    for item in raw.get("questions", []):
+        q = (item.get("q") or "").strip()
+        opts = [str(x).strip() for x in (item.get("options") or [])]
+        ci = int(item.get("correct_index", 0))
+        exp = (item.get("explanation") or "").strip()
+        if not q or len(opts) < 2:
+            continue
+        if ci < 0 or ci >= len(opts):
+            ci = 0
+        questions.append(Question(q=q, options=opts, correct_index=ci, explanation=exp))
+    return BlockFile(file=os.path.basename(path), title=title, questions=questions)

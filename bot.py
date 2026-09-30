@@ -1,3 +1,4 @@
+```python
 # -*- coding: utf-8 -*-
 
 """
@@ -8,8 +9,8 @@ Features:
 - Block 2 has sub-blocks 2.1..2.4
 - Random questions
 - Random answer order
-- Answer buttons A/B/C/D
-- Full answer text shown above buttons
+- Questions remain in chat after answering
+- Answer result is sent as a separate message
 - 60 seconds per question
 - Correct answer shown after answer / timeout
 - Final test: 20 questions
@@ -20,17 +21,12 @@ Features:
 import os
 import json
 import random
-import asyncio
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass
 from typing import List, Optional
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -51,7 +47,6 @@ PER_QUESTION_SECONDS = 60
 FINAL_N = 20
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
 PORT = int(os.environ.get("PORT", "10000"))
 
 
@@ -82,9 +77,7 @@ MAIN_BLOCKS = [
     {
         "key": "b1",
         "title": "1 блок — Аудит",
-        "files": [
-            "block1_audit.json"
-        ],
+        "files": ["block1_audit.json"],
     },
     {
         "key": "b2",
@@ -99,23 +92,17 @@ MAIN_BLOCKS = [
     {
         "key": "b3",
         "title": "3 блок — Митна вартість",
-        "files": [
-            "block3_value.json"
-        ],
+        "files": ["block3_value.json"],
     },
     {
         "key": "b4",
         "title": "4 блок — Походження",
-        "files": [
-            "block4_origin.json"
-        ],
+        "files": ["block4_origin.json"],
     },
     {
         "key": "b5",
         "title": "5 блок — Платежі",
-        "files": [
-            "block5_payments.json"
-        ],
+        "files": ["block5_payments.json"],
     },
 ]
 
@@ -132,30 +119,14 @@ SUBBLOCK_LABELS = {
 # USER SESSIONS
 # ============================================================
 
-# Structure:
-#
-# user_sessions[user_id] = {
-#     "questions": [...],
-#     "current": 0,
-#     "score": 0,
-#     "answered": 0,
-#     "block_title": "...",
-#     "message_id": 123,
-#     "chat_id": 123,
-#     "timer_job": ...
-# }
-
 user_sessions = {}
 
 
 # ============================================================
-# JSON LOADING
+# JSON
 # ============================================================
 
 def load_json_block(path: str) -> BlockFile:
-    """
-    Loads one JSON question file.
-    """
 
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -164,9 +135,10 @@ def load_json_block(path: str) -> BlockFile:
         os.path.basename(path)
     )[0]
 
-    questions: List[Question] = []
+    questions = []
 
     for item in raw.get("questions", []):
+
         q = (item.get("q") or "").strip()
 
         opts = [
@@ -204,9 +176,6 @@ def load_json_block(path: str) -> BlockFile:
 
 
 def load_questions(files: List[str]) -> List[Question]:
-    """
-    Loads questions from several JSON files.
-    """
 
     all_questions = []
 
@@ -215,13 +184,16 @@ def load_questions(files: List[str]) -> List[Question]:
         path = os.path.join(DATA_DIR, filename)
 
         if not os.path.exists(path):
+
             print(
                 f"[WARNING] File not found: {path}",
                 flush=True,
             )
+
             continue
 
         try:
+
             block = load_json_block(path)
 
             print(
@@ -233,6 +205,7 @@ def load_questions(files: List[str]) -> List[Question]:
             all_questions.extend(block.questions)
 
         except Exception as e:
+
             print(
                 f"[ERROR] Could not load {filename}: {e}",
                 flush=True,
@@ -248,11 +221,14 @@ def load_questions(files: List[str]) -> List[Question]:
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
+
         self.send_header(
             "Content-Type",
             "text/plain; charset=utf-8",
         )
+
         self.end_headers()
 
         self.wfile.write(
@@ -264,9 +240,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server():
-    """
-    Small HTTP server for Render Web Service.
-    """
 
     server = HTTPServer(
         ("0.0.0.0", PORT),
@@ -286,6 +259,7 @@ def start_health_server():
 # ============================================================
 
 def main_menu_keyboard():
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -321,6 +295,7 @@ def main_menu_keyboard():
 
 
 def subblock_menu_keyboard():
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -356,15 +331,13 @@ def subblock_menu_keyboard():
 
 
 def answer_keyboard(question_number: int, options_count: int):
-    """
-    Creates A/B/C/D buttons.
-    """
 
     letters = ["A", "B", "C", "D", "E", "F"]
 
     buttons = []
 
     for i in range(options_count):
+
         buttons.append(
             InlineKeyboardButton(
                 letters[i],
@@ -374,7 +347,6 @@ def answer_keyboard(question_number: int, options_count: int):
 
     rows = []
 
-    # Two buttons per row
     for i in range(0, len(buttons), 2):
         rows.append(buttons[i:i + 2])
 
@@ -382,6 +354,7 @@ def answer_keyboard(question_number: int, options_count: int):
 
 
 def after_question_keyboard():
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -399,6 +372,7 @@ def after_question_keyboard():
 
 
 def result_keyboard():
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -416,10 +390,11 @@ def result_keyboard():
 
 
 # ============================================================
-# TEXT HELPERS
+# HELPERS
 # ============================================================
 
 def letter(index: int) -> str:
+
     letters = ["A", "B", "C", "D", "E", "F"]
 
     if 0 <= index < len(letters):
@@ -429,9 +404,6 @@ def letter(index: int) -> str:
 
 
 def escape_html(text: str) -> str:
-    """
-    Basic HTML escaping.
-    """
 
     return (
         str(text)
@@ -446,13 +418,11 @@ def escape_html(text: str) -> str:
 # ============================================================
 
 def prepare_question(question: Question):
-    """
-    Randomizes answer order while keeping the correct answer.
-    """
 
     options_with_correct = []
 
     for index, text in enumerate(question.options):
+
         options_with_correct.append(
             (
                 text,
@@ -482,36 +452,34 @@ def prepare_question(question: Question):
 
 
 # ============================================================
-# SESSION MANAGEMENT
+# SESSION
 # ============================================================
 
 def get_session(user_id: int):
+
     return user_sessions.get(user_id)
 
 
-def clear_session(user_id: int):
-    session = user_sessions.pop(user_id, None)
-
-    if session:
-        job = session.get("timer_job")
-
-        if job:
-            try:
-                job.schedule_removal()
-            except Exception:
-                pass
-
-
 def cancel_timer(session):
+
     job = session.get("timer_job")
 
     if job:
+
         try:
             job.schedule_removal()
         except Exception:
             pass
 
         session["timer_job"] = None
+
+
+def clear_session(user_id: int):
+
+    session = user_sessions.pop(user_id, None)
+
+    if session:
+        cancel_timer(session)
 
 
 # ============================================================
@@ -524,6 +492,7 @@ async def start_test(
     files: List[str],
     block_title: str,
 ):
+
     user = update.effective_user
 
     if not user:
@@ -538,18 +507,12 @@ async def start_test(
         text = (
             "❌ <b>Не знайдено питань.</b>\n\n"
             f"Блок: {escape_html(block_title)}\n\n"
-            "Перевір, чи JSON-файли знаходяться "
-            "в папці <code>data/</code>."
+            "Перевір папку <code>data/</>."
         )
 
         if update.callback_query:
+
             await update.callback_query.edit_message_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_menu_keyboard(),
-            )
-        else:
-            await update.message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=main_menu_keyboard(),
@@ -557,14 +520,11 @@ async def start_test(
 
         return
 
-    # Random order
     random.shuffle(questions)
 
-    # Final test = 20 questions
     if len(questions) > FINAL_N:
         questions = questions[:FINAL_N]
 
-    # Prepare every question with randomized answers
     prepared_questions = [
         prepare_question(q)
         for q in questions
@@ -578,10 +538,10 @@ async def start_test(
         "score": 0,
         "answered": 0,
         "block_title": block_title,
-        "message_id": None,
         "chat_id": update.effective_chat.id,
         "timer_job": None,
         "waiting": True,
+        "result_message_id": None,
     }
 
     await send_current_question(
@@ -592,7 +552,7 @@ async def start_test(
 
 
 # ============================================================
-# SEND CURRENT QUESTION
+# SEND QUESTION
 # ============================================================
 
 async def send_current_question(
@@ -600,6 +560,7 @@ async def send_current_question(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
 ):
+
     session = get_session(user_id)
 
     if not session:
@@ -611,11 +572,13 @@ async def send_current_question(
     questions = session["questions"]
 
     if current >= len(questions):
+
         await finish_test(
             update,
             context,
             user_id,
         )
+
         return
 
     question = questions[current]
@@ -633,8 +596,10 @@ async def send_current_question(
     ]
 
     for i, option in enumerate(question.options):
+
         text_lines.append(
-            f"<b>{letter(i)})</b> {escape_html(option)}"
+            f"<b>{letter(i)})</b> "
+            f"{escape_html(option)}"
         )
 
     text_lines.extend([
@@ -649,35 +614,17 @@ async def send_current_question(
         len(question.options),
     )
 
-    if update.callback_query:
-
-        try:
-            message = await update.callback_query.edit_message_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-
-        except Exception:
-            message = await update.effective_chat.send_message(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-
-    else:
-
-        message = await update.effective_chat.send_message(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
+    # IMPORTANT:
+    # We SEND a NEW question instead of editing the old one.
+    message = await update.effective_chat.send_message(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
 
     session["message_id"] = message.message_id
-    session["chat_id"] = message.chat_id
     session["waiting"] = True
 
-    # Timer
     job = context.job_queue.run_once(
         question_timeout,
         when=PER_QUESTION_SECONDS,
@@ -691,13 +638,14 @@ async def send_current_question(
 
 
 # ============================================================
-# ANSWER HANDLER
+# ANSWER
 # ============================================================
 
 async def answer_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
@@ -712,16 +660,13 @@ async def answer_callback(
     session = get_session(user_id)
 
     if not session:
-        await query.edit_message_text(
-            "Сесія завершена.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
     if not session.get("waiting"):
         return
 
     try:
+
         _, question_number_str, answer_index_str = (
             query.data.split(":")
         )
@@ -734,18 +679,11 @@ async def answer_callback(
 
     current = session["current"]
 
-    # Ignore old button presses
     if question_number != current:
         return
 
-    questions = session["questions"]
+    question = session["questions"][current]
 
-    if current >= len(questions):
-        return
-
-    question = questions[current]
-
-    # Stop timer
     cancel_timer(session)
 
     session["waiting"] = False
@@ -758,6 +696,19 @@ async def answer_callback(
     if is_correct:
         session["score"] += 1
 
+    # IMPORTANT:
+    # Do NOT edit/delete the question.
+    # Just disable its buttons by editing only the markup.
+    try:
+
+        await query.edit_message_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+        pass
+
+    # Send separate result message
     await show_answer_result(
         update,
         context,
@@ -768,83 +719,7 @@ async def answer_callback(
 
 
 # ============================================================
-# TIMEOUT
-# ============================================================
-
-async def question_timeout(
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    data = context.job.data
-
-    user_id = data["user_id"]
-    question_number = data["question_number"]
-
-    session = get_session(user_id)
-
-    if not session:
-        return
-
-    # The user has already answered
-    if not session.get("waiting"):
-        return
-
-    # Old timer
-    if session["current"] != question_number:
-        return
-
-    session["waiting"] = False
-    session["answered"] += 1
-
-    update = None
-
-    try:
-        chat_id = session["chat_id"]
-
-        questions = session["questions"]
-        question = questions[question_number]
-
-        correct_text = question.options[
-            question.correct_index
-        ]
-
-        text_lines = [
-            "⏰ <b>Час вийшов!</b>",
-            "",
-            f"❌ Правильна відповідь: "
-            f"<b>{letter(question.correct_index)})</b> "
-            f"{escape_html(correct_text)}",
-        ]
-
-        if question.explanation:
-            text_lines.extend([
-                "",
-                "💡 <b>Пояснення:</b>",
-                escape_html(question.explanation),
-            ])
-
-        text_lines.extend([
-            "",
-            f"📊 Результат: "
-            f"{session['score']}/{session['answered']}",
-        ])
-
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=session["message_id"],
-            text="\n".join(text_lines),
-            parse_mode=ParseMode.HTML,
-            reply_markup=after_question_keyboard(),
-        )
-
-    except Exception as e:
-        print(
-            f"[ERROR] Timeout handler: {e}",
-            flush=True,
-        )
-
-
-# ============================================================
-# SHOW ANSWER RESULT
+# ANSWER RESULT
 # ============================================================
 
 async def show_answer_result(
@@ -854,6 +729,7 @@ async def show_answer_result(
     is_correct: bool,
     selected_index: Optional[int] = None,
 ):
+
     session = get_session(user_id)
 
     if not session:
@@ -886,7 +762,10 @@ async def show_answer_result(
         selected_index is not None
         and selected_index != correct_index
     ):
-        selected_text = question.options[selected_index]
+
+        selected_text = question.options[
+            selected_index
+        ]
 
         text_lines.extend([
             "",
@@ -896,6 +775,7 @@ async def show_answer_result(
         ])
 
     if question.explanation:
+
         text_lines.extend([
             "",
             "💡 <b>Пояснення:</b>",
@@ -904,24 +784,97 @@ async def show_answer_result(
 
     text_lines.extend([
         "",
-        f"📊 <b>Результат:</b> "
-        f"{session['score']}/{session['answered']}",
+        f"📊 Результат: "
+        f"<b>{session['score']}/{session['answered']}</b>",
     ])
 
-    text = "\n".join(text_lines)
+    # Separate message!
+    message = await update.effective_chat.send_message(
+        "\n".join(text_lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=after_question_keyboard(),
+    )
 
+    session["result_message_id"] = message.message_id
+
+
+# ============================================================
+# TIMEOUT
+# ============================================================
+
+async def question_timeout(
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    data = context.job.data
+
+    user_id = data["user_id"]
+    question_number = data["question_number"]
+
+    session = get_session(user_id)
+
+    if not session:
+        return
+
+    if not session.get("waiting"):
+        return
+
+    if session["current"] != question_number:
+        return
+
+    session["waiting"] = False
+    session["answered"] += 1
+
+    question = session["questions"][question_number]
+
+    correct_text = question.options[
+        question.correct_index
+    ]
+
+    text_lines = [
+        "⏰ <b>Час вийшов!</b>",
+        "",
+        "❌ Правильна відповідь:",
+        f"<b>{letter(question.correct_index)})</b> "
+        f"{escape_html(correct_text)}",
+    ]
+
+    if question.explanation:
+
+        text_lines.extend([
+            "",
+            "💡 <b>Пояснення:</b>",
+            escape_html(question.explanation),
+        ])
+
+    text_lines.extend([
+        "",
+        f"📊 Результат: "
+        f"<b>{session['score']}/{session['answered']}</b>",
+    ])
+
+    # Remove buttons from the question,
+    # but KEEP the question itself.
     try:
-        await update.callback_query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=after_question_keyboard(),
+
+        await context.bot.edit_message_reply_markup(
+            chat_id=session["chat_id"],
+            message_id=session["message_id"],
+            reply_markup=None,
         )
 
-    except Exception as e:
-        print(
-            f"[ERROR] Could not show answer: {e}",
-            flush=True,
-        )
+    except Exception:
+        pass
+
+    # Send timeout as a separate message.
+    message = await context.bot.send_message(
+        chat_id=session["chat_id"],
+        text="\n".join(text_lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=after_question_keyboard(),
+    )
+
+    session["result_message_id"] = message.message_id
 
 
 # ============================================================
@@ -932,6 +885,7 @@ async def next_question_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
@@ -946,11 +900,17 @@ async def next_question_callback(
     session = get_session(user_id)
 
     if not session:
-        await query.edit_message_text(
-            "Сесія завершена.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
+
+    # Remove buttons from result message only.
+    try:
+
+        await query.edit_message_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+        pass
 
     session["current"] += 1
 
@@ -962,7 +922,7 @@ async def next_question_callback(
 
 
 # ============================================================
-# FINISH TEST
+# FINISH
 # ============================================================
 
 async def finish_test(
@@ -970,6 +930,7 @@ async def finish_test(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
 ):
+
     session = get_session(user_id)
 
     if not session:
@@ -1004,43 +965,27 @@ async def finish_test(
         f"Правильних відповідей: "
         f"<b>{score} з {total}</b>\n"
         f"Результат: <b>{percent}%</b>\n\n"
-        "Можеш пройти тест ще раз — "
-        "питання та варіанти відповідей "
-        "будуть перемішані."
+        "Можеш пройти тест ще раз."
     )
 
     clear_session(user_id)
 
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=result_keyboard(),
-            )
-        except Exception:
-            await update.effective_chat.send_message(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=result_keyboard(),
-            )
-
-    else:
-        await update.effective_chat.send_message(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=result_keyboard(),
-        )
+    await update.effective_chat.send_message(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=result_keyboard(),
+    )
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     user = update.effective_user
 
     if user:
@@ -1051,7 +996,7 @@ async def start_command(
         "Це бот для проходження тестів.\n\n"
         f"⏱ На кожне питання — "
         f"<b>{PER_QUESTION_SECONDS} секунд</b>.\n"
-        f"📝 У фінальному тесті — до "
+        f"📝 У тесті — до "
         f"<b>{FINAL_N} питань</b>.\n"
         "🔀 Питання та варіанти відповідей "
         "перемішуються.\n\n"
@@ -1066,13 +1011,14 @@ async def start_command(
 
 
 # ============================================================
-# MAIN MENU CALLBACK
+# MAIN MENU
 # ============================================================
 
 async def main_menu_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
@@ -1095,13 +1041,14 @@ async def main_menu_callback(
 
 
 # ============================================================
-# BLOCK CALLBACK
+# BLOCK
 # ============================================================
 
 async def block_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
@@ -1120,7 +1067,6 @@ async def block_callback(
     if not block:
         return
 
-    # Block 2 has subblocks
     if key == "b2":
 
         text = (
@@ -1145,13 +1091,14 @@ async def block_callback(
 
 
 # ============================================================
-# SUBBLOCK CALLBACK
+# SUBBLOCK
 # ============================================================
 
 async def subblock_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
@@ -1179,44 +1126,41 @@ async def restart_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
 
     user = update.effective_user
 
-    if not user:
-        return
+    if user:
+        clear_session(user.id)
 
-    # We don't know which block after clearing the session,
-    # so return to main menu.
     await query.edit_message_text(
-        "📚 Оберіть блок для нового тесту:",
+        "📚 <b>Оберіть блок для нового тесту:</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=main_menu_keyboard(),
     )
 
 
 # ============================================================
-# ERROR HANDLER
+# ERROR
 # ============================================================
 
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    print(
-        "[ERROR] Telegram application error:",
-        flush=True,
-    )
 
     print(
+        "[ERROR] Telegram application error:",
         repr(context.error),
         flush=True,
     )
 
 
 # ============================================================
-# START BOT
+# MAIN
 # ============================================================
 
 def main():
@@ -1225,29 +1169,16 @@ def main():
     print("Starting Telegram MCQ Bot...", flush=True)
     print("=" * 60, flush=True)
 
-    # --------------------------------------------------------
-    # Check token
-    # --------------------------------------------------------
-
     if not BOT_TOKEN:
 
-        print(
-            "[FATAL] BOT_TOKEN environment variable is missing!",
-            flush=True,
-        )
-
         raise RuntimeError(
-            "BOT_TOKEN is not configured in Render Environment Variables."
+            "BOT_TOKEN is not configured."
         )
 
     print(
         "[OK] BOT_TOKEN found.",
         flush=True,
     )
-
-    # --------------------------------------------------------
-    # Check data directory
-    # --------------------------------------------------------
 
     print(
         f"[INFO] BASE_DIR: {BASE_DIR}",
@@ -1262,7 +1193,8 @@ def main():
     if not os.path.isdir(DATA_DIR):
 
         print(
-            f"[WARNING] Data directory does not exist: {DATA_DIR}",
+            f"[WARNING] Data directory does not exist: "
+            f"{DATA_DIR}",
             flush=True,
         )
 
@@ -1274,6 +1206,7 @@ def main():
         )
 
         try:
+
             files = os.listdir(DATA_DIR)
 
             print(
@@ -1282,6 +1215,7 @@ def main():
             )
 
             for filename in files:
+
                 print(
                     f"  - {filename}",
                     flush=True,
@@ -1294,20 +1228,12 @@ def main():
                 flush=True,
             )
 
-    # --------------------------------------------------------
-    # Render health server
-    # --------------------------------------------------------
-
     health_thread = Thread(
         target=start_health_server,
         daemon=True,
     )
 
     health_thread.start()
-
-    # --------------------------------------------------------
-    # Telegram application
-    # --------------------------------------------------------
 
     print(
         "[INFO] Creating Telegram application...",
@@ -1320,20 +1246,12 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # Commands
-    # --------------------------------------------------------
-
     application.add_handler(
         CommandHandler(
             "start",
             start_command,
         )
     )
-
-    # --------------------------------------------------------
-    # Callback handlers
-    # --------------------------------------------------------
 
     application.add_handler(
         CallbackQueryHandler(
@@ -1377,17 +1295,9 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # Error handler
-    # --------------------------------------------------------
-
     application.add_error_handler(
         error_handler
     )
-
-    # --------------------------------------------------------
-    # Start polling
-    # --------------------------------------------------------
 
     print(
         "[OK] Telegram application created.",
@@ -1411,3 +1321,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```

@@ -1,39 +1,12 @@
-# -*- coding: utf-8 -*-
-
-"""
-Telegram MCQ Bot
-
-Логіка:
-- Основні блоки 1..5
-- Блок 2 має підблоки 2.1..2.4
-- Повний тест блоку = усі питання
-- Фінальний тест блоку = 20 випадкових питань
-- Повний тест підблоку = усі питання
-- Фінальний тест підблоку = 20 випадкових питань
-- Загальний фінальний тест = по 20 питань з кожного блоку 1..5
-  (до 100 питань загалом)
-- Випадковий порядок питань
-- Випадковий порядок відповідей
-- 60 секунд на кожне питання
-- Після відповіді питання НЕ зникає
-- Кнопки відповіді блокуються
-- Результат надсилається окремим повідомленням
-- Після відповіді автоматично надсилається наступне питання
-- Підтримка Render Web Service
-- python-telegram-bot 21.11.1
-"""
-
 import os
 import json
 import random
+import threading
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -42,23 +15,61 @@ from telegram.ext import (
     ContextTypes,
 )
 
-
 # ============================================================
 # SETTINGS
 # ============================================================
 
-DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "data",
-)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PER_QUESTION_SECONDS = 60
 FINAL_N = 20
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Кеш завантажених JSON-файлів
 blocks_cache: Dict[str, "BlockFile"] = {}
+
+
+# ============================================================
+# RENDER HEALTH SERVER
+# ============================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        if self.path == "/health":
+            body = b'{"status":"ok"}'
+            content_type = "application/json"
+        else:
+            body = b"Telegram MCQ Bot is running"
+            content_type = "text/plain; charset=utf-8"
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler,
+    )
+
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+    )
+
+    thread.start()
+
+    print(f"[OK] Health server listening on port {port}")
 
 
 # ============================================================
@@ -81,20 +92,19 @@ class BlockFile:
 
 
 # ============================================================
-# BLOCK STRUCTURE
+# BLOCKS
 # ============================================================
 
-MAIN_BLOCKS = [
-    {
-        "key": "b1",
-        "title": "1 блок — Аудит",
+MAIN_BLOCKS = {
+    "1": {
+        "title": "1. Аудит",
         "files": [
             "block1_audit.json"
         ],
     },
-    {
-        "key": "b2",
-        "title": "2 блок — Законодавство",
+
+    "2": {
+        "title": "2. Законодавство",
         "files": [
             "block2_1_constitution.json",
             "block2_2_civil_service.json",
@@ -102,177 +112,199 @@ MAIN_BLOCKS = [
             "block2_4_corruption.json",
         ],
     },
-    {
-        "key": "b3",
-        "title": "3 блок — Митна вартість",
+
+    "3": {
+        "title": "3. Митна вартість",
         "files": [
             "block3_value.json"
         ],
     },
-    {
-        "key": "b4",
-        "title": "4 блок — Походження",
+
+    "4": {
+        "title": "4. Походження",
         "files": [
             "block4_origin.json"
         ],
     },
-    {
-        "key": "b5",
-        "title": "5 блок — Платежі",
+
+    "5": {
+        "title": "5. Платежі",
         "files": [
             "block5_payments.json"
         ],
     },
-]
+}
 
 
 SUBBLOCK_LABELS = {
     "block2_1_constitution.json":
-        "2.1 Конституція",
+        "2.1 Конституція України",
 
     "block2_2_civil_service.json":
-        "2.2 Держслужба",
+        "2.2 Державна служба",
 
     "block2_3_mku.json":
-        "2.3 МКУ",
+        "2.3 Митний кодекс України",
 
     "block2_4_corruption.json":
-        "2.4 Корупція",
+        "2.4 Запобігання корупції",
 }
 
 
 # ============================================================
-# DATA LOADING
+# LOAD QUESTIONS
 # ============================================================
 
-def load_json_block(path: str) -> BlockFile:
+def load_block_file(filename: str) -> BlockFile:
+
+    path = os.path.join(DATA_DIR, filename)
 
     with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+        data = json.load(f)
 
-    title = (
-        raw.get("title")
-        or os.path.splitext(
-            os.path.basename(path)
-        )[0]
-    )
+    if isinstance(data, dict):
+        raw_questions = data.get("questions", [])
+        title = data.get(
+            "title",
+            SUBBLOCK_LABELS.get(filename, filename)
+        )
 
-    questions: List[Question] = []
+    elif isinstance(data, list):
+        raw_questions = data
+        title = SUBBLOCK_LABELS.get(
+            filename,
+            filename
+        )
 
-    for item in raw.get("questions", []):
+    else:
+        raise ValueError(
+            f"Invalid JSON format: {filename}"
+        )
 
-        q = (
-            item.get("q")
-            or ""
+    questions = []
+
+    for number, item in enumerate(
+        raw_questions,
+        start=1
+    ):
+
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{filename}: question #{number} is not an object"
+            )
+
+        question_text = str(
+            item.get("q", "")
         ).strip()
 
-        opts = [
-            str(x).strip()
-            for x in (
-                item.get("options")
-                or []
+        options = item.get("options", [])
+
+        correct_index = item.get(
+            "correct_index"
+        )
+
+        if not question_text:
+            raise ValueError(
+                f"{filename}: question #{number} has empty q"
             )
+
+        if not isinstance(options, list):
+            raise ValueError(
+                f"{filename}: question #{number} has invalid options"
+            )
+
+        if len(options) < 2:
+            raise ValueError(
+                f"{filename}: question #{number} needs at least 2 options"
+            )
+
+        options = [
+            str(option)
+            for option in options
         ]
 
-        try:
-            ci = int(
-                item.get(
-                    "correct_index",
-                    0,
-                )
-            )
-        except (
-            TypeError,
-            ValueError,
+        if not isinstance(
+            correct_index,
+            int
         ):
-            ci = 0
+            raise ValueError(
+                f"{filename}: question #{number} has invalid correct_index"
+            )
 
-        exp = (
-            item.get("explanation")
-            or ""
+        if not (
+            0 <= correct_index < len(options)
+        ):
+            raise ValueError(
+                f"{filename}: question #{number} correct_index out of range"
+            )
+
+        explanation = str(
+            item.get("explanation", "")
         ).strip()
-
-        if not q:
-            continue
-
-        if len(opts) < 2:
-            continue
-
-        if ci < 0 or ci >= len(opts):
-            ci = 0
 
         questions.append(
             Question(
-                q=q,
-                options=opts,
-                correct_index=ci,
-                explanation=exp,
+                q=question_text,
+                options=options,
+                correct_index=correct_index,
+                explanation=explanation,
             )
         )
 
     return BlockFile(
-        file=os.path.basename(path),
+        file=filename,
         title=title,
         questions=questions,
     )
 
 
-def load_all_blocks() -> Dict[str, BlockFile]:
+def load_all_blocks():
 
-    blocks: Dict[str, BlockFile] = {}
+    global blocks_cache
+
+    blocks_cache = {}
 
     if not os.path.isdir(DATA_DIR):
-
-        raise RuntimeError(
-            f"Missing data dir: {DATA_DIR}"
+        raise FileNotFoundError(
+            f"Data directory not found: {DATA_DIR}"
         )
 
-    for filename in os.listdir(DATA_DIR):
+    for filename in sorted(
+        os.listdir(DATA_DIR)
+    ):
 
         if not filename.lower().endswith(".json"):
             continue
 
-        path = os.path.join(
-            DATA_DIR,
-            filename,
+        block = load_block_file(filename)
+
+        blocks_cache[filename] = block
+
+        print(
+            f"[OK] Loaded {filename}: "
+            f"{len(block.questions)} questions"
         )
 
-        try:
-
-            block = load_json_block(path)
-
-            blocks[filename] = block
-
-            print(
-                f"[INFO] Loaded "
-                f"{len(block.questions)} "
-                f"questions from "
-                f"{filename}",
-                flush=True,
-            )
-
-        except Exception as e:
-
-            print(
-                f"[ERROR] Could not load "
-                f"{filename}: {e}",
-                flush=True,
-            )
-
-    return blocks
-
 
 # ============================================================
-# TIMER
+# SESSION HELPERS
 # ============================================================
 
-def session_cancel_timer(
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+def get_sessions(context):
+    if "sessions" not in context.application.bot_data:
+        context.application.bot_data["sessions"] = {}
 
-    job = context.user_data.get(
-        "timer_job"
-    )
+    return context.application.bot_data["sessions"]
+
+
+def get_session(context, chat_id):
+
+    return get_sessions(context).get(chat_id)
+
+
+def session_cancel_timer(session):
+
+    job = session.get("timer_job")
 
     if job:
 
@@ -281,61 +313,46 @@ def session_cancel_timer(
         except Exception:
             pass
 
-    context.user_data["timer_job"] = None
+    session["timer_job"] = None
 
 
 # ============================================================
-# HELPERS
+# QUESTION HELPERS
 # ============================================================
 
-def fmt_options_with_letters(
-    opts: List[str],
-) -> str:
-
-    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-    lines = []
-
-    for i, opt in enumerate(opts):
-
-        lines.append(
-            f"{letters[i]}. {opt}"
-        )
-
-    return "\n".join(lines)
+LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
-def pick_random(
-    questions: List[Question],
-    n: int,
-) -> List[Question]:
+def format_options(options):
 
-    if not questions:
-        return []
-
-    if n >= len(questions):
-
-        return random.sample(
-            questions,
-            len(questions),
-        )
-
-    return random.sample(
-        questions,
-        n,
+    return "\n".join(
+        f"{LETTERS[i]}. {option}"
+        for i, option in enumerate(options)
     )
 
 
-def merge_questions(
-    files: List[str],
-    blocks: Dict[str, BlockFile],
-) -> List[Question]:
+def random_questions(
+    questions,
+    count=None,
+):
 
-    result: List[Question] = []
+    result = list(questions)
+
+    random.shuffle(result)
+
+    if count is not None:
+        return result[:count]
+
+    return result
+
+
+def merge_questions(files):
+
+    result = []
 
     for filename in files:
 
-        block = blocks.get(filename)
+        block = blocks_cache.get(filename)
 
         if block:
             result.extend(
@@ -345,441 +362,473 @@ def merge_questions(
     return result
 
 
+def shuffle_answers(question):
+
+    pairs = list(
+        enumerate(question.options)
+    )
+
+    random.shuffle(pairs)
+
+    options = [
+        text
+        for _, text in pairs
+    ]
+
+    correct_index = next(
+        new_index
+        for new_index, (
+            old_index,
+            _
+        ) in enumerate(pairs)
+        if old_index == question.correct_index
+    )
+
+    return options, correct_index
+
+
 # ============================================================
-# ANSWER KEYBOARD
+# KEYBOARDS
 # ============================================================
 
-def build_answer_keyboard(
-    n: int,
-    qid: int,
-) -> InlineKeyboardMarkup:
+def answer_keyboard(
+    qid,
+    options_count,
+):
 
-    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    buttons = []
 
-    row = []
+    for i in range(options_count):
 
-    for i in range(n):
-
-        row.append(
+        buttons.append(
             InlineKeyboardButton(
-                letters[i],
+                LETTERS[i],
                 callback_data=(
                     f"ans|{qid}|{i}"
                 ),
             )
         )
 
-    rows = [
-        row[i:i + 6]
-        for i in range(
-            0,
-            len(row),
-            6,
-        )
-    ]
+    rows = []
 
-    rows.append([
-        InlineKeyboardButton(
-            "⛔ Завершити тест",
-            callback_data="quit",
+    for i in range(
+        0,
+        len(buttons),
+        6,
+    ):
+        rows.append(
+            buttons[i:i + 6]
         )
-    ])
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⛔ Завершити тест",
+                callback_data="quit",
+            )
+        ]
+    )
 
     return InlineKeyboardMarkup(rows)
 
 
+def main_menu_keyboard():
+
+    rows = []
+
+    for key, block in MAIN_BLOCKS.items():
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    block["title"],
+                    callback_data=f"main|{key}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🎓 Загальний фінальний тест (20 з кожного блоку)",
+                callback_data="global_final",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
+
+
+def block2_keyboard():
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                "📚 Весь блок 2",
+                callback_data="full|2",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"🎓 Фінальний тест блоку 2 ({FINAL_N})",
+                callback_data="final|2",
+            )
+        ],
+    ]
+
+    for filename in MAIN_BLOCKS["2"]["files"]:
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    SUBBLOCK_LABELS.get(
+                        filename,
+                        filename
+                    ),
+                    callback_data=f"sub|{filename}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data="back_main",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
+
+
+def normal_block_keyboard(block_key):
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📚 Повний тест",
+                    callback_data=f"full|{block_key}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"🎓 Фінальний тест ({FINAL_N})",
+                    callback_data=f"final|{block_key}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Назад",
+                    callback_data="back_main",
+                )
+            ],
+        ]
+    )
+
+
+def subblock_keyboard(filename):
+
+    label = SUBBLOCK_LABELS.get(
+        filename,
+        filename
+    )
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"📚 Повний тест: {label}",
+                    callback_data=f"subfull|{filename}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"🎓 Фінальний тест ({FINAL_N})",
+                    callback_data=f"subfinal|{filename}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Назад до законодавства",
+                    callback_data="back_block2",
+                )
+            ],
+        ]
+    )
+
+
 # ============================================================
-# MAIN MENU
+# MENUS
 # ============================================================
 
 async def show_main_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+    update,
+    context,
+):
 
-    session_cancel_timer(context)
-
-    context.user_data.pop(
-        "session",
-        None,
+    text = (
+        "📋 <b>Головне меню</b>\n\n"
+        "Оберіть блок тестування:"
     )
 
-    keyboard = []
+    if update.callback_query:
 
-    for block in MAIN_BLOCKS:
+        query = update.callback_query
 
-        keyboard.append([
-            InlineKeyboardButton(
-                block["title"],
-                callback_data=(
-                    f"menu|{block['key']}"
-                ),
-            )
-        ])
+        await query.answer()
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "🎓 Загальний фінальний тест "
-            "(20 з кожного блоку)",
-            callback_data="global_final",
+        await query.edit_message_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
         )
-    ])
 
-    await update.effective_chat.send_message(
-        "📚 <b>Оберіть блок:</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-    )
+    else:
 
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
 
-# ============================================================
-# BLOCK MENU
-# ============================================================
 
 async def show_block_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    block_key: str,
-) -> None:
+    update,
+    context,
+    block_key,
+):
 
-    session_cancel_timer(context)
+    query = update.callback_query
 
-    context.user_data.pop(
-        "session",
-        None,
-    )
+    await query.answer()
 
-    block = next(
-        (
-            x
-            for x in MAIN_BLOCKS
-            if x["key"] == block_key
+    block = MAIN_BLOCKS[block_key]
+
+    if block_key == "2":
+        keyboard = block2_keyboard()
+    else:
+        keyboard = normal_block_keyboard(
+            block_key
+        )
+
+    await query.edit_message_text(
+        text=(
+            f"📂 <b>{block['title']}</b>\n\n"
+            "Оберіть режим:"
         ),
-        None,
-    )
-
-    if not block:
-
-        await show_main_menu(
-            update,
-            context,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # BLOCK 2
-    # --------------------------------------------------------
-
-    if block_key == "b2":
-
-        keyboard = []
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "▶ Повний тест Блоку 2 "
-                "(усі питання)",
-                callback_data=(
-                    "start|b2|full"
-                ),
-            )
-        ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🎯 Фінальний тест Блоку 2 "
-                f"({FINAL_N} випадкових)",
-                callback_data=(
-                    "start|b2|final"
-                ),
-            )
-        ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "— Підблоки —",
-                callback_data="noop",
-            )
-        ])
-
-        for filename in block["files"]:
-
-            label = SUBBLOCK_LABELS.get(
-                filename,
-                blocks_cache.get(
-                    filename
-                ).title
-                if blocks_cache.get(filename)
-                else filename,
-            )
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    label,
-                    callback_data=(
-                        f"submenu|{filename}"
-                    ),
-                )
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "⬅ Назад",
-                callback_data="back",
-            )
-        ])
-
-        await update.callback_query.message.reply_text(
-            "📚 <b>Блок 2 — Законодавство</b>\n\n"
-            "Оберіть режим або підблок:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
-            ),
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # OTHER BLOCKS
-    # --------------------------------------------------------
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "▶ Повний тест "
-                "(усі питання)",
-                callback_data=(
-                    f"start|{block_key}|full"
-                ),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"🎯 Фінальний тест "
-                f"({FINAL_N} випадкових)",
-                callback_data=(
-                    f"start|{block_key}|final"
-                ),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⬅ Назад",
-                callback_data="back",
-            )
-        ],
-    ]
-
-    await update.callback_query.message.reply_text(
-        f"<b>{block['title']}</b>\n\n"
-        "Оберіть режим:",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
+        reply_markup=keyboard,
     )
 
-
-# ============================================================
-# SUBBLOCK MENU
-# ============================================================
 
 async def show_subblock_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    subfile: str,
-) -> None:
+    update,
+    context,
+    filename,
+):
 
-    session_cancel_timer(context)
+    query = update.callback_query
 
-    context.user_data.pop(
-        "session",
-        None,
-    )
-
-    block = blocks_cache.get(
-        subfile
-    )
-
-    if not block:
-
-        await update.callback_query.message.reply_text(
-            "❌ Не знайшов файл підблоку."
-        )
-
-        return
+    await query.answer()
 
     label = SUBBLOCK_LABELS.get(
-        subfile,
-        block.title,
+        filename,
+        filename
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "▶ Повний тест підблоку",
-                callback_data=(
-                    f"startfile|{subfile}|full"
-                ),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"🎯 Фінальний тест підблоку "
-                f"({FINAL_N})",
-                callback_data=(
-                    f"startfile|{subfile}|final"
-                ),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⬅ Назад до Блоку 2",
-                callback_data="menu|b2",
-            )
-        ],
-    ]
-
-    await update.callback_query.message.reply_text(
-        f"<b>{label}</b>\n\n"
-        "Оберіть режим:",
+    await query.edit_message_text(
+        text=(
+            f"📂 <b>{label}</b>\n\n"
+            "Оберіть режим:"
+        ),
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
+        reply_markup=subblock_keyboard(
+            filename
         ),
     )
 
 
 # ============================================================
-# BUILD TEST
+# BUILD TESTS
 # ============================================================
 
 def build_test_questions(
-    mode: str,
-    block_key: Optional[str],
-    subfile: Optional[str],
-) -> Tuple[str, List[Question]]:
+    mode,
+    block_key=None,
+    filename=None,
+):
 
-    # --------------------------------------------------------
-    # SUBBLOCK
-    # --------------------------------------------------------
+    if mode in (
+        "subfull",
+        "subfinal",
+    ):
 
-    if subfile:
+        if (
+            not filename
+            or filename not in blocks_cache
+        ):
+            return [], "Помилка: блок не знайдено."
 
-        block = blocks_cache.get(
-            subfile
+        source = list(
+            blocks_cache[filename].questions
         )
 
-        if not block:
-            return "", []
+        label = SUBBLOCK_LABELS.get(
+            filename,
+            filename
+        )
 
-        pool = block.questions
+        if mode == "subfinal":
 
-        if mode == "final":
-
-            questions = pick_random(
-                pool,
-                FINAL_N,
+            questions = random_questions(
+                source,
+                FINAL_N
             )
 
             title = (
-                f"{SUBBLOCK_LABELS.get(subfile, block.title)} "
-                f"— фінальний ({len(questions)})"
+                f"🎓 Фінальний тест: {label}"
             )
 
-            return title, questions
+        else:
 
-        questions = random.sample(
-            pool,
-            len(pool),
+            questions = random_questions(
+                source
+            )
+
+            title = (
+                f"📚 Повний тест: {label}"
+            )
+
+        return questions, title
+
+    if mode in (
+        "full",
+        "final",
+    ):
+
+        if block_key not in MAIN_BLOCKS:
+
+            return [], "Помилка: блок не знайдено."
+
+        source = merge_questions(
+            MAIN_BLOCKS[block_key]["files"]
         )
 
-        title = (
-            f"{SUBBLOCK_LABELS.get(subfile, block.title)} "
-            f"— повний"
+        if mode == "final":
+
+            questions = random_questions(
+                source,
+                FINAL_N
+            )
+
+            title = (
+                "🎓 Фінальний тест: "
+                f"{MAIN_BLOCKS[block_key]['title']}"
+            )
+
+        else:
+
+            questions = random_questions(
+                source
+            )
+
+            title = (
+                "📚 Повний тест: "
+                f"{MAIN_BLOCKS[block_key]['title']}"
+            )
+
+        return questions, title
+
+    return [], "Помилка режиму тесту."
+
+
+def build_global_final():
+
+    all_questions = []
+
+    for block_key in MAIN_BLOCKS:
+
+        source = merge_questions(
+            MAIN_BLOCKS[block_key]["files"]
         )
 
-        return title, questions
-
-    # --------------------------------------------------------
-    # MAIN BLOCK
-    # --------------------------------------------------------
-
-    block = next(
-        (
-            x
-            for x in MAIN_BLOCKS
-            if x["key"] == block_key
-        ),
-        None,
-    )
-
-    if not block:
-        return "", []
-
-    pool = merge_questions(
-        block["files"],
-        blocks_cache,
-    )
-
-    if mode == "final":
-
-        questions = pick_random(
-            pool,
-            FINAL_N,
+        selected = random_questions(
+            source,
+            FINAL_N
         )
 
-        title = (
-            f"{block['title']} "
-            f"— фінальний ({len(questions)})"
+        all_questions.extend(
+            selected
         )
 
-        return title, questions
+    random.shuffle(all_questions)
 
-    questions = random.sample(
-        pool,
-        len(pool),
+    return (
+        all_questions,
+        "🎓 <b>Загальний фінальний тест</b>\n"
+        "По 20 питань з кожного основного блоку."
     )
-
-    title = (
-        f"{block['title']} — повний"
-    )
-
-    return title, questions
 
 
 # ============================================================
 # START SESSION
 # ============================================================
 
-def start_session(
-    context: ContextTypes.DEFAULT_TYPE,
-    title: str,
-    questions: List[Question],
-) -> None:
+async def start_session(
+    update,
+    context,
+    questions,
+    title,
+):
 
-    context.user_data["session"] = {
+    chat_id = update.effective_chat.id
 
+    if not questions:
+
+        await update.effective_chat.send_message(
+            "❌ У цьому тесті немає питань."
+        )
+
+        return
+
+    sessions = get_sessions(context)
+
+    old_session = sessions.get(chat_id)
+
+    if old_session:
+        session_cancel_timer(
+            old_session
+        )
+
+    session = {
         "title": title,
-
         "questions": questions,
-
         "i": 0,
-
         "correct": 0,
-
         "qid": 0,
-
         "current": None,
-
         "answered": False,
-
+        "timer_job": None,
         "question_message_id": None,
-
     }
+
+    sessions[chat_id] = session
+
+    await update.effective_chat.send_message(
+        f"{title}\n\n"
+        f"📊 Кількість питань: "
+        f"<b>{len(questions)}</b>\n"
+        f"⏱ Час на питання: "
+        f"<b>{PER_QUESTION_SECONDS} секунд</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+    await send_question(
+        chat_id,
+        context
+    )
 
 
 # ============================================================
@@ -787,700 +836,510 @@ def start_session(
 # ============================================================
 
 async def send_question(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+    chat_id,
+    context,
+):
 
-    session = context.user_data.get(
-        "session"
+    session = get_session(
+        context,
+        chat_id
     )
 
     if not session:
         return
 
-    questions: List[
-        Question
-    ] = session["questions"]
-
-    i: int = session["i"]
-
-    if i >= len(questions):
-
-        await finish_session(
-            update,
-            context,
-        )
-
-        return
-
-    # Cancel previous timer
     session_cancel_timer(
-        context
+        session
     )
 
-    question = questions[i]
-
-    # --------------------------------------------------------
-    # RANDOMIZE ANSWERS
-    # --------------------------------------------------------
-
-    order = list(
-        range(
-            len(question.options)
-        )
-    )
-
-    random.shuffle(order)
-
-    shuffled_options = [
-        question.options[index]
-        for index in order
-    ]
-
-    correct_new_index = order.index(
-        question.correct_index
-    )
-
-    # --------------------------------------------------------
-    # STORE CURRENT QUESTION
-    # --------------------------------------------------------
-
-    session["current"] = {
-
-        "shuffled_opts":
-            shuffled_options,
-
-        "correct_index":
-            correct_new_index,
-
-    }
-
-    session["answered"] = False
-
-    session["qid"] += 1
-
-    qid = session["qid"]
-
-    # --------------------------------------------------------
-    # MESSAGE
-    # --------------------------------------------------------
-
-    header = (
-        f"🧩 <b>{session['title']}</b>\n"
-        f"Питання {i + 1}/"
-        f"{len(questions)}"
-        f"  ⏱ "
-        f"{PER_QUESTION_SECONDS}с"
-    )
-
-    body = (
-        f"\n\n"
-        f"<b>{question.q}</b>"
-        f"\n\n"
-        f"{fmt_options_with_letters(shuffled_options)}"
-    )
-
-    message_text = (
-        header
-        + body
-    )
-
-    # --------------------------------------------------------
-    # TIMER
-    # --------------------------------------------------------
-
-    job = context.job_queue.run_once(
-
-        timeout_question,
-
-        when=PER_QUESTION_SECONDS,
-
-        data={
-            "chat_id":
-                update.effective_chat.id,
-
-            "user_id":
-                update.effective_user.id,
-
-            "qid":
-                qid,
-        },
-    )
-
-    context.user_data["timer_job"] = job
-
-    # --------------------------------------------------------
-    # SEND NEW MESSAGE
-    # --------------------------------------------------------
-
-    message = await update.effective_chat.send_message(
-
-        message_text,
-
-        reply_markup=build_answer_keyboard(
-            len(shuffled_options),
-            qid,
-        ),
-
-        parse_mode=ParseMode.HTML,
-
-        disable_web_page_preview=True,
-    )
-
-    session[
-        "question_message_id"
-    ] = message.message_id
-
-
-# ============================================================
-# SEND QUESTION DIRECTLY
-# Used by timeout handler
-# ============================================================
-
-async def send_question_direct(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    user_id: int,
-) -> None:
-
-    user_data = (
-        context.application
-        .user_data
-        .get(user_id)
-    )
-
-    if not user_data:
-        return
-
-    session = user_data.get(
-        "session"
-    )
-
-    if not session:
-        return
-
-    questions: List[
-        Question
-    ] = session["questions"]
-
-    i: int = session["i"]
-
-    if i >= len(questions):
+    if session["i"] >= len(
+        session["questions"]
+    ):
 
         await finish_session_direct(
-            context,
             chat_id,
-            user_id,
+            context
         )
 
         return
 
-    # Cancel old timer
-    old_job = user_data.get(
-        "timer_job"
-    )
-
-    if old_job:
-
-        try:
-            old_job.schedule_removal()
-        except Exception:
-            pass
-
-    user_data["timer_job"] = None
-
-    question = questions[i]
-
-    # Randomize answers
-    order = list(
-        range(
-            len(question.options)
-        )
-    )
-
-    random.shuffle(order)
-
-    shuffled_options = [
-        question.options[index]
-        for index in order
+    question = session["questions"][
+        session["i"]
     ]
 
-    correct_new_index = order.index(
-        question.correct_index
+    options, correct_index = shuffle_answers(
+        question
     )
 
+    session["qid"] += 1
+
     session["current"] = {
-
-        "shuffled_opts":
-            shuffled_options,
-
-        "correct_index":
-            correct_new_index,
+        "question": question,
+        "options": options,
+        "correct_index": correct_index,
     }
 
     session["answered"] = False
 
-    session["qid"] += 1
-
     qid = session["qid"]
 
-    header = (
-        f"🧩 <b>{session['title']}</b>\n"
-        f"Питання {i + 1}/"
-        f"{len(questions)}"
-        f"  ⏱ "
-        f"{PER_QUESTION_SECONDS}с"
+    text = (
+        f"❓ <b>Питання "
+        f"{session['i'] + 1}/"
+        f"{len(session['questions'])}</b>\n\n"
+        f"{question.q}\n\n"
+        f"{format_options(options)}"
     )
-
-    body = (
-        f"\n\n"
-        f"<b>{question.q}</b>"
-        f"\n\n"
-        f"{fmt_options_with_letters(shuffled_options)}"
-    )
-
-    message_text = (
-        header
-        + body
-    )
-
-    # New timer
-    job = context.job_queue.run_once(
-
-        timeout_question,
-
-        when=PER_QUESTION_SECONDS,
-
-        data={
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "qid": qid,
-        },
-    )
-
-    user_data["timer_job"] = job
 
     message = await context.bot.send_message(
-
         chat_id=chat_id,
-
-        text=message_text,
-
-        reply_markup=build_answer_keyboard(
-            len(shuffled_options),
-            qid,
-        ),
-
+        text=text,
         parse_mode=ParseMode.HTML,
-
-        disable_web_page_preview=True,
+        reply_markup=answer_keyboard(
+            qid,
+            len(options)
+        ),
     )
 
-    session[
-        "question_message_id"
-    ] = message.message_id
+    session["question_message_id"] = (
+        message.message_id
+    )
+
+    session["timer_job"] = (
+        context.job_queue.run_once(
+            timeout_question,
+            PER_QUESTION_SECONDS,
+            data={
+                "chat_id": chat_id,
+                "qid": qid,
+            },
+        )
+    )
 
 
 # ============================================================
 # TIMEOUT
 # ============================================================
 
-async def timeout_question(
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def timeout_question(context):
 
     data = context.job.data
 
     chat_id = data["chat_id"]
-
-    user_id = data["user_id"]
-
     qid = data["qid"]
 
-    user_data = (
-        context.application
-        .user_data
-        .get(user_id)
-    )
-
-    if not user_data:
-        return
-
-    session = user_data.get(
-        "session"
+    session = get_session(
+        context,
+        chat_id
     )
 
     if not session:
         return
 
-    # Ignore old timer
-    if session.get("qid") != qid:
+    if session["qid"] != qid:
         return
 
-    # Already answered
-    if session.get("answered"):
+    if session["answered"]:
         return
 
     session["answered"] = True
+    session["timer_job"] = None
 
-    # Cancel timer reference
-    user_data["timer_job"] = None
+    current = session["current"]
 
-    current = (
-        session.get("current")
-        or {}
-    )
+    if not current:
+        return
 
-    options = (
-        current.get(
-            "shuffled_opts"
-        )
-        or []
-    )
+    try:
 
-    correct_index = int(
-        current.get(
-            "correct_index",
-            0,
-        )
-    )
-
-    letters = (
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    )
-
-    if (
-        0 <= correct_index
-        < len(options)
-    ):
-
-        correct_text = (
-            options[correct_index]
+        await context.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=session[
+                "question_message_id"
+            ],
+            reply_markup=None,
         )
 
-        correct_answer = (
-            f"{letters[correct_index]}. "
-            f"{correct_text}"
-        )
+    except Exception:
+        pass
 
-    else:
+    correct_index = current[
+        "correct_index"
+    ]
 
-        correct_answer = (
-            "невідома"
-        )
+    correct_answer = current[
+        "options"
+    ][correct_index]
 
-    # --------------------------------------------------------
-    # REMOVE BUTTONS ONLY
-    # QUESTION ITSELF REMAINS
-    # --------------------------------------------------------
+    explanation = current[
+        "question"
+    ].explanation
 
-    question_message_id = session.get(
-        "question_message_id"
-    )
-
-    if question_message_id:
-
-        try:
-
-            await context.bot.edit_message_reply_markup(
-
-                chat_id=chat_id,
-
-                message_id=question_message_id,
-
-                reply_markup=None,
-            )
-
-        except Exception as e:
-
-            print(
-                "[WARNING] Could not "
-                "remove timeout "
-                f"keyboard: {e}",
-                flush=True,
-            )
-
-    # --------------------------------------------------------
-    # RESULT
-    # --------------------------------------------------------
-
-    result_text = (
+    result = (
         "⏰ <b>Час вичерпано!</b>\n\n"
-        "❌ Правильна відповідь:\n"
-        f"<b>{correct_answer}</b>"
+        f"❌ Правильна відповідь: "
+        f"<b>{LETTERS[correct_index]}. "
+        f"{correct_answer}</b>"
     )
 
-    # Explanation
-    questions = session["questions"]
-
-    current_index = session["i"]
-
-    if (
-        0 <= current_index
-        < len(questions)
-    ):
-
-        explanation = (
-            questions[
-                current_index
-            ].explanation
+    if explanation:
+        result += (
+            f"\n\n💡 {explanation}"
         )
-
-        if explanation:
-
-            result_text += (
-                "\n\n"
-                "💡 <b>Пояснення:</b>\n"
-                f"{explanation}"
-            )
 
     await context.bot.send_message(
-
         chat_id=chat_id,
-
-        text=result_text,
-
+        text=result,
         parse_mode=ParseMode.HTML,
-
-        disable_web_page_preview=True,
     )
 
-    # Move to next question
     session["i"] += 1
 
+    if session["i"] >= len(
+        session["questions"]
+    ):
+
+        await finish_session_direct(
+            chat_id,
+            context
+        )
+
+        return
+
     await context.bot.send_message(
-
         chat_id=chat_id,
-
-        text="➡️ <b>Наступне питання…</b>",
-
+        text="➡️ <b>Наступне питання</b>",
         parse_mode=ParseMode.HTML,
     )
 
-    await send_question_direct(
-
-        context,
-
+    await send_question(
         chat_id,
-
-        user_id,
+        context
     )
 
 
 # ============================================================
-# FINISH DIRECT
+# FINISH
 # ============================================================
 
 async def finish_session_direct(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    user_id: int,
-) -> None:
+    chat_id,
+    context,
+):
 
-    user_data = (
-        context.application
-        .user_data
-        .get(user_id)
-    )
+    sessions = get_sessions(context)
 
-    if not user_data:
-        return
-
-    session = user_data.get(
-        "session"
-    )
+    session = sessions.get(chat_id)
 
     if not session:
         return
 
     session_cancel_timer(
-        context
+        session
     )
-
-    questions = session[
-        "questions"
-    ]
-
-    total = len(questions)
-
-    correct = session[
-        "correct"
-    ]
-
-    percentage = (
-        round(
-            100.0
-            * correct
-            / total,
-            1,
-        )
-        if total
-        else 0.0
-    )
-
-    await context.bot.send_message(
-
-        chat_id=chat_id,
-
-        text=(
-            "🏁 <b>Тест завершено!</b>\n\n"
-            f"📚 {session['title']}\n\n"
-            f"✅ Правильних: "
-            f"<b>{correct}/{total}</b>\n"
-            f"📊 Результат: "
-            f"<b>{percentage}%</b>"
-        ),
-
-        parse_mode=ParseMode.HTML,
-    )
-
-    user_data.pop(
-        "session",
-        None,
-    )
-
-
-# ============================================================
-# FINISH SESSION
-# ============================================================
-
-async def finish_session(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    session_cancel_timer(
-        context
-    )
-
-    session = context.user_data.get(
-        "session"
-    )
-
-    if not session:
-        return
 
     total = len(
         session["questions"]
     )
 
-    correct = session[
-        "correct"
-    ]
+    correct = session["correct"]
 
-    percentage = (
+    wrong = total - correct
+
+    percent = (
         round(
-            100.0
-            * correct
-            / total,
-            1,
+            correct / total * 100
         )
         if total
-        else 0.0
+        else 0
     )
 
-    await update.effective_chat.send_message(
-
+    text = (
         "🏁 <b>Тест завершено!</b>\n\n"
         f"📚 {session['title']}\n\n"
-        f"✅ Правильних: "
-        f"<b>{correct}/{total}</b>\n"
-        f"📊 Результат: "
-        f"<b>{percentage}%</b>",
+        f"✅ Правильних: <b>{correct}</b>\n"
+        f"❌ Неправильних: <b>{wrong}</b>\n"
+        f"📊 Результат: <b>{percent}%</b>\n\n"
+        "Натисніть /start, "
+        "щоб обрати інший тест."
+    )
 
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
         parse_mode=ParseMode.HTML,
     )
 
-    context.user_data.pop(
-        "session",
-        None,
+    sessions.pop(
+        chat_id,
+        None
     )
 
 
 # ============================================================
-# START COMMAND
+# /START
 # ============================================================
 
-async def cmd_start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def start_command(
+    update,
+    context,
+):
+
+    chat_id = update.effective_chat.id
+
+    sessions = get_sessions(context)
+
+    old_session = sessions.get(
+        chat_id
+    )
+
+    if old_session:
+        session_cancel_timer(
+            old_session
+        )
+
+        sessions.pop(
+            chat_id,
+            None
+        )
 
     await show_main_menu(
         update,
-        context,
+        context
     )
 
 
 # ============================================================
-# CALLBACK HANDLER
+# CALLBACKS
 # ============================================================
 
-async def on_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def callback_handler(
+    update,
+    context,
+):
 
     query = update.callback_query
 
-    await query.answer()
-
     data = query.data or ""
+
+    chat_id = update.effective_chat.id
 
     # --------------------------------------------------------
     # NOOP
     # --------------------------------------------------------
 
     if data == "noop":
+
+        await query.answer()
+
         return
 
     # --------------------------------------------------------
-    # BACK
+    # BACK MAIN
     # --------------------------------------------------------
 
-    if data == "back":
+    if data == "back_main":
 
         await show_main_menu(
             update,
-            context,
+            context
         )
 
         return
 
     # --------------------------------------------------------
-    # MAIN BLOCK MENU
+    # BACK BLOCK 2
     # --------------------------------------------------------
 
-    if data.startswith("menu|"):
-
-        block_key = data.split(
-            "|",
-            1,
-        )[1]
+    if data == "back_block2":
 
         await show_block_menu(
             update,
             context,
-            block_key,
+            "2"
         )
 
         return
 
     # --------------------------------------------------------
-    # SUBBLOCK MENU
+    # MAIN BLOCK
     # --------------------------------------------------------
 
-    if data.startswith("submenu|"):
+    if data.startswith("main|"):
 
-        subfile = data.split(
+        block_key = data.split(
             "|",
-            1,
+            1
         )[1]
+
+        if block_key not in MAIN_BLOCKS:
+
+            await query.answer(
+                "Блок не знайдено.",
+                show_alert=True
+            )
+
+            return
+
+        await show_block_menu(
+            update,
+            context,
+            block_key
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SUBBLOCK
+    # --------------------------------------------------------
+
+    if data.startswith("sub|"):
+
+        filename = data.split(
+            "|",
+            1
+        )[1]
+
+        if filename not in blocks_cache:
+
+            await query.answer(
+                "Файл блоку не знайдено.",
+                show_alert=True
+            )
+
+            return
 
         await show_subblock_menu(
             update,
             context,
-            subfile,
+            filename
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # FULL MAIN
+    # --------------------------------------------------------
+
+    if data.startswith("full|"):
+
+        block_key = data.split(
+            "|",
+            1
+        )[1]
+
+        questions, title = build_test_questions(
+            "full",
+            block_key=block_key
+        )
+
+        await query.answer()
+
+        await start_session(
+            update,
+            context,
+            questions,
+            title
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # FINAL MAIN
+    # --------------------------------------------------------
+
+    if data.startswith("final|"):
+
+        block_key = data.split(
+            "|",
+            1
+        )[1]
+
+        questions, title = build_test_questions(
+            "final",
+            block_key=block_key
+        )
+
+        await query.answer()
+
+        await start_session(
+            update,
+            context,
+            questions,
+            title
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # FULL SUBBLOCK
+    # --------------------------------------------------------
+
+    if data.startswith("subfull|"):
+
+        filename = data.split(
+            "|",
+            1
+        )[1]
+
+        questions, title = build_test_questions(
+            "subfull",
+            filename=filename
+        )
+
+        await query.answer()
+
+        await start_session(
+            update,
+            context,
+            questions,
+            title
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # FINAL SUBBLOCK
+    # --------------------------------------------------------
+
+    if data.startswith("subfinal|"):
+
+        filename = data.split(
+            "|",
+            1
+        )[1]
+
+        questions, title = build_test_questions(
+            "subfinal",
+            filename=filename
+        )
+
+        await query.answer()
+
+        await start_session(
+            update,
+            context,
+            questions,
+            title
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # GLOBAL FINAL
+    # --------------------------------------------------------
+
+    if data == "global_final":
+
+        questions, title = build_global_final()
+
+        await query.answer()
+
+        await start_session(
+            update,
+            context,
+            questions,
+            title
         )
 
         return
@@ -1491,202 +1350,45 @@ async def on_callback(
 
     if data == "quit":
 
-        session_cancel_timer(
-            context
-        )
+        await query.answer()
 
-        context.user_data.pop(
-            "session",
-            None,
-        )
-
-        await query.message.reply_text(
-            "⛔ <b>Тест зупинено.</b>",
-            parse_mode=ParseMode.HTML,
-        )
-
-        await show_main_menu(
-            update,
+        session = get_session(
             context,
+            chat_id
         )
 
-        return
-
-    # --------------------------------------------------------
-    # GLOBAL FINAL TEST
-    #
-    # 20 RANDOM QUESTIONS FROM EACH
-    # MAIN BLOCK 1..5
-    #
-    # TOTAL = UP TO 100
-    # --------------------------------------------------------
-
-    if data == "global_final":
+        if not session:
+            return
 
         session_cancel_timer(
+            session
+        )
+
+        try:
+
+            await query.edit_message_reply_markup(
+                reply_markup=None
+            )
+
+        except Exception:
+            pass
+
+        get_sessions(
             context
+        ).pop(
+            chat_id,
+            None
         )
 
-        context.user_data.pop(
-            "session",
-            None,
-        )
-
-        pools = []
-
-        for block in MAIN_BLOCKS:
-
-            pool = merge_questions(
-                block["files"],
-                blocks_cache,
-            )
-
-            selected = pick_random(
-                pool,
-                FINAL_N,
-            )
-
-            pools.extend(
-                selected
-            )
-
-        random.shuffle(
-            pools
-        )
-
-        title = (
-            "🎓 Загальний фінальний тест "
-            f"({FINAL_N} з кожного блоку)"
-        )
-
-        if not pools:
-
-            await query.message.reply_text(
-                "❌ Немає питань для "
-                "фінального тесту."
-            )
-
-            return
-
-        start_session(
-            context,
-            title,
-            pools,
-        )
-
-        await query.message.reply_text(
-            "🎓 <b>Починаємо загальний "
-            "фінальний тест!</b>\n\n"
-            f"Буде до <b>{len(pools)}</b> "
-            "питань.",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⛔ <b>Тест завершено "
+                "достроково.</b>\n\n"
+                "Натисніть /start, "
+                "щоб обрати інший тест."
+            ),
             parse_mode=ParseMode.HTML,
-        )
-
-        await send_question(
-            update,
-            context,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # START MAIN BLOCK TEST
-    # --------------------------------------------------------
-
-    if data.startswith("start|"):
-
-        _, block_key, mode = (
-            data.split(
-                "|",
-                2,
-            )
-        )
-
-        title, questions = (
-            build_test_questions(
-                mode,
-                block_key,
-                None,
-            )
-        )
-
-        if not questions:
-
-            await query.message.reply_text(
-                "❌ Немає питань у цьому блоці."
-            )
-
-            return
-
-        start_session(
-            context,
-            title,
-            questions,
-        )
-
-        await query.message.reply_text(
-            "▶ <b>Починаємо тест…</b>",
-            parse_mode=ParseMode.HTML,
-        )
-
-        await send_question(
-            update,
-            context,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # START SUBBLOCK TEST
-    # --------------------------------------------------------
-
-    if data.startswith("startfile|"):
-
-        _, subfile, mode = (
-            data.split(
-                "|",
-                2,
-            )
-        )
-
-        if subfile not in blocks_cache:
-
-            await query.message.reply_text(
-                "❌ Не знайшов підблок."
-            )
-
-            return
-
-        title, questions = (
-            build_test_questions(
-                mode,
-                None,
-                subfile,
-            )
-        )
-
-        if not questions:
-
-            await query.message.reply_text(
-                "❌ У підблоці немає питань."
-            )
-
-            return
-
-        start_session(
-            context,
-            title,
-            questions,
-        )
-
-        await query.message.reply_text(
-            "▶ <b>Починаємо тест…</b>",
-            parse_mode=ParseMode.HTML,
-        )
-
-        await send_question(
-            update,
-            context,
         )
 
         return
@@ -1697,325 +1399,234 @@ async def on_callback(
 
     if data.startswith("ans|"):
 
-        session = (
-            context.user_data.get(
-                "session"
-            )
-        )
+        parts = data.split("|")
 
-        if not session:
+        if len(parts) != 3:
 
-            await query.message.reply_text(
-                "❌ Сесія не активна.\n"
-                "Натисни /start"
-            )
+            await query.answer()
 
             return
 
         try:
 
-            _, qid_str, idx_str = (
-                data.split(
-                    "|",
-                    2,
-                )
-            )
+            qid = int(parts[1])
+            selected_index = int(parts[2])
 
-            qid = int(qid_str)
+        except ValueError:
 
-            selected_index = int(
-                idx_str
-            )
-
-        except Exception:
+            await query.answer()
 
             return
 
-        # ----------------------------------------------------
-        # OLD QUESTION
-        # ----------------------------------------------------
+        session = get_session(
+            context,
+            chat_id
+        )
 
-        if session.get("qid") != qid:
+        if not session:
+
+            await query.answer(
+                "Тест вже завершено.",
+                show_alert=True
+            )
 
             return
 
-        # ----------------------------------------------------
-        # ALREADY ANSWERED
-        # ----------------------------------------------------
+        if session["qid"] != qid:
 
-        if session.get("answered"):
+            await query.answer(
+                "Це питання вже неактивне.",
+                show_alert=True
+            )
+
+            return
+
+        if session["answered"]:
+
+            await query.answer(
+                "Ви вже відповіли.",
+                show_alert=True
+            )
+
+            return
+
+        current = session["current"]
+
+        if not current:
+
+            await query.answer()
+
+            return
+
+        options = current["options"]
+
+        if not (
+            0 <= selected_index < len(options)
+        ):
+
+            await query.answer()
 
             return
 
         session["answered"] = True
 
-        # Stop timer
         session_cancel_timer(
-            context
+            session
         )
 
-        current = (
-            session.get("current")
-            or {}
-        )
+        try:
 
-        options = (
-            current.get(
-                "shuffled_opts"
+            await query.edit_message_reply_markup(
+                reply_markup=None
             )
-            or []
-        )
 
-        correct_index = int(
-            current.get(
-                "correct_index",
-                0,
-            )
-        )
+        except Exception:
+            pass
 
-        letters = (
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        )
+        correct_index = current[
+            "correct_index"
+        ]
 
-        if not (
-            0 <= selected_index
-            < len(options)
-        ):
-
-            return
-
-        # ----------------------------------------------------
-        # REMOVE BUTTONS ONLY
-        #
-        # QUESTION MESSAGE REMAINS
-        # ----------------------------------------------------
-
-        question_message_id = (
-            session.get(
-                "question_message_id"
-            )
-        )
-
-        if question_message_id:
-
-            try:
-
-                await query.edit_message_reply_markup(
-                    reply_markup=None
-                )
-
-            except Exception as e:
-
-                print(
-                    "[WARNING] Could not "
-                    "remove answer "
-                    f"keyboard: {e}",
-                    flush=True,
-                )
-
-        # ----------------------------------------------------
-        # CORRECT ANSWER
-        # ----------------------------------------------------
-
-        correct_text = options[
+        correct_answer = options[
             correct_index
         ]
 
-        if (
+        selected_answer = options[
             selected_index
-            == correct_index
-        ):
+        ]
+
+        is_correct = (
+            selected_index == correct_index
+        )
+
+        if is_correct:
 
             session["correct"] += 1
 
-            result_text = (
+            result = (
                 "✅ <b>Правильно!</b>\n\n"
-                f"Правильна відповідь:\n"
-                f"<b>"
-                f"{letters[correct_index]}"
-                f". {correct_text}"
-                f"</b>"
+                f"Ваша відповідь: "
+                f"<b>{LETTERS[selected_index]}. "
+                f"{selected_answer}</b>"
             )
-
-        # ----------------------------------------------------
-        # WRONG ANSWER
-        # ----------------------------------------------------
 
         else:
 
-            selected_text = options[
-                selected_index
-            ]
-
-            result_text = (
+            result = (
                 "❌ <b>Неправильно!</b>\n\n"
-                "Твоя відповідь:\n"
-                f"<b>"
-                f"{letters[selected_index]}"
-                f". {selected_text}"
-                f"</b>\n\n"
-                "✅ Правильна відповідь:\n"
-                f"<b>"
-                f"{letters[correct_index]}"
-                f". {correct_text}"
-                f"</b>"
+                f"Ваша відповідь: "
+                f"<b>{LETTERS[selected_index]}. "
+                f"{selected_answer}</b>\n\n"
+                f"Правильна відповідь: "
+                f"<b>{LETTERS[correct_index]}. "
+                f"{correct_answer}</b>"
             )
 
-        # ----------------------------------------------------
-        # EXPLANATION
-        # ----------------------------------------------------
+        explanation = current[
+            "question"
+        ].explanation
 
-        questions = session[
-            "questions"
-        ]
+        if explanation:
 
-        current_index = session[
-            "i"
-        ]
-
-        if (
-            0 <= current_index
-            < len(questions)
-        ):
-
-            explanation = (
-                questions[
-                    current_index
-                ].explanation
+            result += (
+                f"\n\n💡 {explanation}"
             )
 
-            if explanation:
-
-                result_text += (
-                    "\n\n"
-                    "💡 <b>Пояснення:</b>\n"
-                    f"{explanation}"
-                )
-
-        # ----------------------------------------------------
-        # RESULT AS SEPARATE MESSAGE
-        # ----------------------------------------------------
-
-        await query.message.reply_text(
-
-            result_text,
-
-            parse_mode=ParseMode.HTML,
-
-            disable_web_page_preview=True,
+        await query.answer(
+            "Правильно!"
+            if is_correct
+            else "Неправильно!"
         )
 
-        # ----------------------------------------------------
-        # NEXT QUESTION
-        # ----------------------------------------------------
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=result,
+            parse_mode=ParseMode.HTML,
+        )
 
         session["i"] += 1
 
-        await query.message.reply_text(
-            "➡️ <b>Наступне питання…</b>",
+        if session["i"] >= len(
+            session["questions"]
+        ):
+
+            await finish_session_direct(
+                chat_id,
+                context
+            )
+
+            return
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="➡️ <b>Наступне питання</b>",
             parse_mode=ParseMode.HTML,
         )
 
         await send_question(
-            update,
-            context,
+            chat_id,
+            context
         )
 
         return
 
-    # --------------------------------------------------------
-    # UNKNOWN
-    # --------------------------------------------------------
-
-    await query.message.reply_text(
-        "❓ Невідома команда.\n"
-        "Натисни /start"
-    )
+    await query.answer()
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
-def main() -> None:
+def main():
 
-    global blocks_cache
-
-    print(
-        "=" * 60,
-        flush=True,
-    )
-
-    print(
-        "Starting Telegram MCQ Bot...",
-        flush=True,
-    )
-
-    print(
-        "=" * 60,
-        flush=True,
-    )
-
-    # --------------------------------------------------------
-    # ENV CHECK
-    # --------------------------------------------------------
-
-    print(
-        "=== ENV CHECK START ===",
-        flush=True,
-    )
-
-    print(
-        "HAS BOT_TOKEN =",
-        "BOT_TOKEN" in os.environ,
-        flush=True,
-    )
-
-    print(
-        "=== ENV CHECK END ===",
-        flush=True,
-    )
+    print("========================================")
+    print("Telegram MCQ Bot starting...")
+    print("========================================")
 
     if not BOT_TOKEN:
 
         raise RuntimeError(
-            "Set BOT_TOKEN environment variable first"
+            "BOT_TOKEN environment variable is not set."
         )
 
-    # --------------------------------------------------------
-    # DATA
-    # --------------------------------------------------------
+    print("[OK] BOT_TOKEN found.")
 
     print(
-        f"[INFO] DATA_DIR: {DATA_DIR}",
-        flush=True,
+        f"[INFO] BASE_DIR: {BASE_DIR}"
+    )
+
+    print(
+        f"[INFO] DATA_DIR: {DATA_DIR}"
     )
 
     if not os.path.isdir(DATA_DIR):
 
         raise RuntimeError(
-            f"Missing data directory: "
-            f"{DATA_DIR}"
+            f"Data directory not found: {DATA_DIR}"
         )
 
-    blocks_cache = (
-        load_all_blocks()
+    print(
+        "[OK] Data directory found."
     )
 
     print(
-        f"[INFO] Loaded "
-        f"{len(blocks_cache)} "
-        f"JSON files.",
-        flush=True,
+        "[INFO] Loading question files..."
     )
 
-    # --------------------------------------------------------
-    # APPLICATION
-    # --------------------------------------------------------
+    load_all_blocks()
+
+    print(
+        "[INFO] Starting health server..."
+    )
+
+    start_health_server()
+
+    print(
+        "[INFO] Creating Telegram application..."
+    )
 
     application = (
-        Application
-        .builder()
+        Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
@@ -2023,24 +1634,22 @@ def main() -> None:
     application.add_handler(
         CommandHandler(
             "start",
-            cmd_start,
+            start_command
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            on_callback
+            callback_handler
         )
     )
 
     print(
-        "[OK] Telegram application created.",
-        flush=True,
+        "[OK] Telegram application created."
     )
 
     print(
-        "[INFO] Starting polling...",
-        flush=True,
+        "[INFO] Starting polling..."
     )
 
     application.run_polling(

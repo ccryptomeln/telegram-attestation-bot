@@ -1,12 +1,4 @@
 
-
-
-
-
-
-
-
-
 # -*- coding: utf-8 -*-
 """
 Telegram MCQ Bot (single correct) with:
